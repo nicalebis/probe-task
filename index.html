@@ -145,6 +145,8 @@ let OPTIONS = {
   SKIP_TRAINING: false  
 };
 
+let STUDY_TYPE = 'rectangles'; // or 'letters'
+
 const MODEL_OPTS = {
   TARGET_ACC: 0.75,
   // Choose one of:
@@ -170,6 +172,7 @@ let TRIAL_DEFAULTS = {
   probe_color: 'red'
 };
 
+
 // Video list (edit as needed)
 const video_list = [
   'videos/clip1.mp4',
@@ -179,12 +182,22 @@ const video_list = [
   'videos/clip5.mp4'
 ];
 
+const preloadVideos = {
+  type: jsPsychPreload,
+  auto_preload: false,
+  video: video_list,
+};
+
+
+
 // ================ helpers ================
 function getPxPerMm(){
   if (typeof window.__px_per_mm === 'number') return window.__px_per_mm;
   const props = jsPsych.data.get().properties?.() || {};
   return (typeof props.px_per_mm === 'number') ? props.px_per_mm : null;
 }
+
+
 
 // =============================
 // UI Trial: SettingsScreen (first page to tweak parameters)
@@ -1587,8 +1600,6 @@ parameters:{
     const shell = document.createElement('div'); shell.className='video-shell'; container.appendChild(shell);
 
     const vid = document.createElement('video'); vid.setAttribute('playsinline',''); vid.controls=false; vid.muted=true; vid.setAttribute('muted',''); if(trial.autoplay) vid.setAttribute('autoplay','');
-    vid.addEventListener('pause', ()=>{ vid.play().catch(()=>{}); });
-    vid.addEventListener('seeking', ()=>{ vid.play().catch(()=>{}); });
     (trial.stimulus||[]).forEach(src=>{ const s=document.createElement('source'); s.src=src; s.addEventListener('error',()=>console.error('SOURCE failed to load:',s.src)); vid.appendChild(s); });
     shell.appendChild(vid);
 
@@ -1621,11 +1632,67 @@ parameters:{
     function pickProbe(){ const size=choose(sizesPx); const w=size.w,h=size.h; const xMin=Math.round(trial.bounds.xMinFrac*overlay.width)+w/2; const xMax=Math.round(trial.bounds.xMaxFrac*overlay.width)-w/2; const yMin=Math.round(trial.bounds.yMinFrac*overlay.height)+h/2; const yMax=Math.round(trial.bounds.yMaxFrac*overlay.height)-h/2; const x=Math.round(randFloat(xMin,xMax)); const y=Math.round(randFloat(yMin,yMax)); return {x,y,w,h}; }
 
     // Optional adaptive cadence
-    let minSOA=trial.min_soa, maxSOA=trial.max_soa;
-    function scheduleNextProbe(jitterMs){ cancelNextProbe(); const d=(typeof jitterMs==='number')?jitterMs:randInt(minSOA,maxSOA); nextTimer=setTimeout(showProbe,d); }
-    function cancelNextProbe(){ if(nextTimer){ clearTimeout(nextTimer); nextTimer=null; } }
 
-    function showProbe(){ if(ended) return; if(!trialStartPerf) return; const pos=pickProbe(); const onset_video_ms=vid.currentTime*1000; const onset_perf_ms=performance.now(); probe={...pos,onset_video_ms,onset_perf_ms,timeout_id:null}; draw(); events.push({type:'probe',x:probe.x,y:probe.y,w:probe.w,h:probe.h,onset_video_ms:Math.round(onset_video_ms),onset_trial_ms:Math.round(onset_perf_ms-trialStartPerf)}); probe.timeout_id=setTimeout(()=>{ if(!probe) return; events.push({type:'miss',x:probe.x,y:probe.y,w:probe.w,h:probe.h,onset_video_ms:Math.round(probe.onset_video_ms),onset_trial_ms:Math.round(probe.onset_perf_ms-trialStartPerf)}); probe=null; draw(); scheduleNextProbe(); }, trial.probe_duration); }
+let minSOA = trial.min_soa, maxSOA = trial.max_soa;
+
+function msNow(){ return performance.now(); }
+function msVideo(){ return vid.currentTime * 1000; }
+function msVideoTotal(){ return (isFinite(vid.duration) && vid.duration > 0) ? vid.duration * 1000 : Infinity; }
+
+const MIN_ONSCREEN_MS = 33; // ~1 frame
+
+function scheduleNextProbe(jitterMs){
+  cancelNextProbe();
+  if (ended) return;
+  const d = (typeof jitterMs === 'number') ? jitterMs : randInt(minSOA, maxSOA);
+  nextTimer = setTimeout(() => {
+    if (ended) return;
+    showProbe();
+  }, d);
+}
+
+function cancelNextProbe(){ if(nextTimer){ clearTimeout(nextTimer); nextTimer=null; } }
+
+function showProbe(){
+  if (ended || !trialStartPerf) return;
+
+  const nowVidMs   = msVideo();
+  const totalVidMs = msVideoTotal();
+  const remainMs   = totalVidMs - nowVidMs;
+
+  if (remainMs < MIN_ONSCREEN_MS) return; // nothing meaningful left
+
+  const pos = pickProbe();
+  const onset_video_ms = msVideo();
+  const onset_perf_ms  = msNow();
+
+  // Clamp lifetime to remaining video time (leave a few ms for cleanup)
+  const dur = Math.min(trial.probe_duration, Math.max(0, (totalVidMs - onset_video_ms) - 8));
+
+  probe = { ...pos, onset_video_ms, onset_perf_ms, timeout_id: null };
+  draw();
+
+  events.push({
+    type: 'probe',
+    x: probe.x, y: probe.y, w: probe.w, h: probe.h,
+    onset_video_ms: Math.round(onset_video_ms),
+    onset_trial_ms: Math.round(onset_perf_ms - trialStartPerf)
+  });
+
+  if (dur >= MIN_ONSCREEN_MS) {
+    probe.timeout_id = setTimeout(() => {
+      if (!probe) return; // already hit/cleared
+      events.push({
+        type: 'miss',
+        x: probe.x, y: probe.y, w: probe.w, h: probe.h,
+        onset_video_ms: Math.round(probe.onset_video_ms),
+        onset_trial_ms: Math.round(probe.onset_perf_ms - trialStartPerf)
+      });
+      probe = null; draw();
+      scheduleNextProbe();
+    }, dur);
+  }
+}
 
     function clearProbeVisualOnly(){ if(probe){ if(probe.timeout_id) clearTimeout(probe.timeout_id); probe=null; draw(); } }
 
@@ -1642,17 +1709,153 @@ parameters:{
 
     let keyListener=false; const attach=()=>{ if(!keyListener){ keyListener=true; window.addEventListener('keydown', onKeydown);} }; const detach=()=>{ if(keyListener){ keyListener=false; window.removeEventListener('keydown', onKeydown);} };
 
-    const endTrial=()=>{ ended=true; cancelNextProbe(); clearProbeVisualOnly(); detach(); window.removeEventListener('resize', resizeCanvasToVideo); 
-document.body.classList.remove('fullblack'); 
-const dur_ms=vid.duration?Math.round(vid.duration*1000):null; 
-const trial_data={ plugin:'video-probe-detect', video_src: trial.stimulus?.[0]||'', data_tag: trial.data_tag||'', video_duration_ms: dur_ms, overlay_width: overlay.width, overlay_height: overlay.height, bounds: trial.bounds, minSOA, maxSOA, sizesPx, px_per_mm, events }; display_element.innerHTML=''; this.jsPsych.finishTrial(trial_data); };
 
-    const onFirstPlay=()=>{ resizeCanvasToVideo(); window.addEventListener('resize', resizeCanvasToVideo); trialStartPerf=performance.now(); attach(); scheduleNextProbe(); };
-    vid.addEventListener('loadedmetadata', resizeCanvasToVideo);
-    vid.addEventListener('play', onFirstPlay, {once:true});
-    if (trial.trial_ends_after_video) vid.addEventListener('ended', endTrial);
+    // after video element creation
+vid.preload = 'auto';
+vid.playsInline = true;           // already set via attribute, set property too
+vid.muted = true;
 
-    vid.load(); if(trial.autoplay) vid.play().catch(err=>console.warn('Autoplay blocked; click Play. Reason:', err));
+// --- helper: wait for first actual rendered frame ---
+function waitForFirstFrame(video){
+  return new Promise((resolve) => {
+    if (!video.paused && video.readyState >= 2 && video.currentTime > 0){
+      requestAnimationFrame(()=>resolve());
+      return;
+    }
+    let resolved = false, rvfc = null;
+    const cleanup = () => {
+      ['playing','timeupdate','seeked','loadeddata','canplay'].forEach(ev =>
+        video.removeEventListener(ev, onProgress)
+      );
+      if (rvfc && 'cancelVideoFrameCallback' in video) video.cancelVideoFrameCallback(rvfc);
+    };
+    const onProgress = () => {
+      if (resolved) return;
+      if (!video.paused && video.readyState >= 2){
+        if ('requestVideoFrameCallback' in video){
+          rvfc = video.requestVideoFrameCallback(() => {
+            resolved = true; cleanup(); resolve();
+          });
+        } else if (video.currentTime > 0){
+          resolved = true; cleanup(); resolve();
+        }
+      }
+    };
+    ['playing','timeupdate','seeked','loadeddata','canplay'].forEach(ev =>
+      video.addEventListener(ev, onProgress)
+    );
+    onProgress(); // kick in case we're already mid-state
+  });
+}
+
+// keep your existing resize function:
+vid.addEventListener('loadedmetadata', resizeCanvasToVideo);
+
+// pause/resume probes around stalls or tab hides
+function pauseProbes(){
+  cancelNextProbe();
+  clearProbeVisualOnly();
+}
+function resumeProbes(){
+  if (!ended && trialStartPerf){
+    scheduleNextProbe(randInt(200, 400));
+  }
+}
+
+
+
+
+
+const endTrial = () => {
+  if (ended || !started) return;
+  ended = true;
+  if (onEnded){ vid.removeEventListener('ended', onEnded); onEnded = null; }
+
+  // If a probe is visible when the clip ends, count it
+  if (probe) {
+    events.push({
+      type: 'miss_end',
+      x: probe.x, y: probe.y, w: probe.w, h: probe.h,
+      onset_video_ms: Math.round(probe.onset_video_ms),
+      onset_trial_ms: Math.round(probe.onset_perf_ms - trialStartPerf)
+    });
+    clearProbeVisualOnly();
+  }
+
+  pauseProbes();
+  detach();
+  window.removeEventListener('resize', resizeCanvasToVideo);
+  document.body.classList.remove('fullblack');
+
+  const dur_ms = (vid.duration && isFinite(vid.duration) && vid.duration > 0)
+    ? Math.round(vid.duration * 1000)
+    : Math.round(msNow() - trialStartPerf);
+
+  const trial_data = {
+    plugin: 'video-probe-detect',
+    video_src: trial.stimulus?.[0] || '',
+    data_tag: trial.data_tag || '',
+    video_duration_ms: dur_ms,
+    overlay_width: overlay.width,
+    overlay_height: overlay.height,
+    bounds: trial.bounds,
+    minSOA, maxSOA, sizesPx, px_per_mm,
+    events
+  };
+  display_element.innerHTML = '';
+  this.jsPsych.finishTrial(trial_data);
+};
+
+
+
+vid.addEventListener('waiting',  pauseProbes);
+vid.addEventListener('stalled',  pauseProbes);
+vid.addEventListener('suspend',  pauseProbes);
+vid.addEventListener('seeking',  pauseProbes);
+vid.addEventListener('playing',  resumeProbes);
+document.addEventListener('visibilitychange', ()=>{
+  if (document.hidden) pauseProbes(); else resumeProbes();
+});
+vid.addEventListener('pause',   ()=>{ vid.play().catch(()=>{}); });
+vid.addEventListener('seeking', ()=>{ vid.play().catch(()=>{}); });
+
+// start once a real frame is on-screen
+let started = false;
+
+
+
+
+let onEnded = null;
+
+async function startTrialAfterFirstFrame(){
+  resizeCanvasToVideo();
+  window.addEventListener('resize', resizeCanvasToVideo);
+  await waitForFirstFrame(vid);
+  trialStartPerf = performance.now();
+  started = true;
+  attach();
+  setTimeout(() => scheduleNextProbe(), 150); // tiny guard to avoid probe on frame 1
+  onEnded = () => endTrial();
+  if (trial.trial_ends_after_video) vid.addEventListener('ended', onEnded);
+}
+
+
+
+// kick off load and playback
+vid.currentTime = 0;
+vid.load();
+if (trial.autoplay) {
+  vid.play().then(() => {
+    startTrialAfterFirstFrame();
+  }).catch(err => {
+    console.warn('Autoplay blocked; waiting for user gesture.', err);
+    // user will click; on first play, start after first frame
+    vid.addEventListener('play', () => startTrialAfterFirstFrame(), { once: true });
+  });
+} else {
+  vid.addEventListener('play', () => startTrialAfterFirstFrame(), { once: true });
+}
+
   }
 }
 
@@ -2016,8 +2219,21 @@ return [
 
 
 
-
 function buildAndAppendMainTimeline(){
+  const rest = [];
+
+  // 0) Preload videos
+  rest.push(preloadVideos);
+
+  // 1) Calibration (optional)
+  if (OPTIONS.USE_CALIBRATION) rest.push({ type: CalibrationCard });
+
+  // 2) Training or skip
+  if (!OPTIONS.SKIP_TRAINING) rest.push(...trainingSequence());
+
+  // 3) Instructions, then blocks, then end screen...
+  rest.push(instructions);
+
   const seq = shuffled(video_list);
   const blocks = [];
   seq.forEach((v,i)=>{
@@ -2027,19 +2243,6 @@ function buildAndAppendMainTimeline(){
     if (OPTIONS.USE_MICRO_QUESTIONS && (i+1) % OPTIONS.MICRO_QUESTION_EVERY === 0) blocks.push(microCheck);
   });
 
-  const rest = [];
-
-  // Calibration remains optional, based on the toggle
-  if (OPTIONS.USE_CALIBRATION) rest.push({ type: CalibrationCard });
-
-  // Either run training (A–C + Stage 1–3) or skip straight to instructions
-  if (!OPTIONS.SKIP_TRAINING) {
-    rest.push(...trainingSequence());
-  }
-
-  // Always show instructions right before the main experiment
-  rest.push(instructions);
-
   // Then the main blocks (which already start with a countdown)
   rest.push(...blocks);
 
@@ -2048,6 +2251,8 @@ function buildAndAppendMainTimeline(){
 
   jsPsych.addNodeToEndOfTimeline({ timeline: rest }, ()=>{});
 }
+
+
 
 // =============================
 // Launch minimal timeline: (optional fullscreen) -> SettingsScreen
